@@ -39,6 +39,8 @@ omp plugin upgrade omp-devin-acp
 omp plugin uninstall omp-devin-acp
 ```
 
+bun caches git dependencies, so a reinstall on a machine that already fetched this repo can restore the cached revision instead of current `main`; `omp plugin upgrade` forces the refetch.
+
 For development against a working copy, skip the install and link or load the source directly:
 
 ```sh
