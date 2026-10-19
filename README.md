@@ -23,24 +23,26 @@ Sessions are scoped to the omp session that started them, not to the module: a s
 ## Install
 
 ```sh
-git clone <this repo> ~/dev/omp-devin-acp
+omp plugin install "git+ssh://git@github.com/dsebban/omp-devin-acp.git"
 ```
 
-Then either link it as a plugin:
+Installs into `~/.omp/plugins/node_modules/omp-devin-acp`; omp then discovers the `omp.extensions` entry in `package.json` on every run, so no `extensions:` config line is needed. Add `--scope project` to install it for one repo instead of the user.
+
+The repo is private, so the SSH URL is required: bun resolves the `github:dsebban/omp-devin-acp` shorthand through `api.github.com/.../tarball`, which returns 404 without a token. `git+ssh://` clones over your SSH key instead.
+
+Updating and removing:
 
 ```sh
-omp plugin link ~/dev/omp-devin-acp
+omp plugin upgrade omp-devin-acp
+omp plugin uninstall omp-devin-acp
 ```
 
-or point omp's `extensions:` setting at it:
+For development against a working copy, skip the install and link or load the source directly:
 
-```yaml
-# ~/.omp/agent/config.yml
-extensions:
-  - ~/dev/omp-devin-acp
+```sh
+omp plugin link ~/dev/omp-devin-acp          # or
+omp -e ~/dev/omp-devin-acp/src/index.ts      # single run
 ```
-
-or load it for one run: `omp -e ~/dev/omp-devin-acp/src/index.ts`.
 
 ## Configuration
 
