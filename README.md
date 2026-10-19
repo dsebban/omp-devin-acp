@@ -9,9 +9,11 @@ This is an out-of-tree omp extension: it installs no patches into oh-my-pi and s
 | Surface | Name | Behavior |
 |---|---|---|
 | Tool | `devin` | Runs one Devin turn in the session's cwd. Streams Devin's tool activity into omp's tool preview and returns its final answer. |
-| Command | `/devin` | Session status (session id, mode, model, effort); `/devin reset`, `/devin mode <id>`, `/devin model <id>`, `/devin effort <id>`. |
+| Command | `/devin` | Session status (session id, mode, model, effort). `/devin mode`, `/devin model`, `/devin effort` open a picker of the values Devin advertises, with the active one marked; append an id (`/devin model swe-2-high`) to set it without the dialog. `/devin reset` drops the session. |
 
 Devin keeps its own tool loop: it reads, edits, and executes with its own tools, in the omp session's working directory. Consecutive `devin` tool calls reuse one live ACP session per directory, so follow-up prompts keep Devin's context.
+
+omp's own `/model` picker will never list Devin's models, by design. Those 94 ids are session config options living inside the Devin process — Devin reports them in its `session/new` reply and owns the inference — while `/model` lists omp's catalog of providers it calls directly. This extension registers a *tool*, not a provider, because an ACP session runs its own agent loop and cannot be driven as a completion endpoint. `/devin model` is the equivalent picker.
 
 Sessions are scoped to the omp session that started them, not to the module: a subagent gets its own Devin session, and its teardown never touches the parent's. Each omp session's Devin processes stop on `session_shutdown`.
 

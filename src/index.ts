@@ -128,6 +128,38 @@ async function resolvePermission(
 	return options.find(option => option.name === label)?.optionId;
 }
 
+/**
+ * Let the user pick one of Devin's advertised values, marking the active one.
+ *
+ * The selector returns the chosen *label*, so labels are the bare ids Devin
+ * expects and everything else goes in the description.
+ */
+async function choose(
+	ctx: ExtensionContext,
+	title: string,
+	values: readonly string[],
+	current: string | undefined,
+): Promise<string | undefined> {
+	if (values.length === 0) {
+		ctx.ui.notify(`${title}: Devin advertises no options`, "warning");
+		return undefined;
+	}
+	return await ctx.ui.select(
+		`${title} (current: ${current ?? "?"})`,
+		values.map(value => (value === current ? { label: value, description: "current" } : value)),
+	);
+}
+
+/** Run a setting change, reporting Devin's rejection instead of throwing at the host. */
+async function apply(ctx: ExtensionContext, success: string, change: () => Promise<void>): Promise<void> {
+	try {
+		await change();
+		ctx.ui.notify(success, "info");
+	} catch (error) {
+		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+	}
+}
+
 export default function devinAcpExtension(pi: ExtensionAPI): void {
 	const z = pi.zod;
 	const logger: DevinLogger = pi.logger;
@@ -193,7 +225,7 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("devin", {
-		description: "Devin ACP session: status, or `reset` / `mode <id>` / `model <id>` / `effort <id>`",
+		description: "Devin ACP session: status, or `reset` / `mode` / `model` / `effort` (id optional — picks if omitted)",
 		handler: async (args, ctx) => {
 			const [verb, value] = args.trim().split(/\s+/, 2);
 			if (verb === "reset") {
@@ -201,22 +233,43 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("Devin session reset", "info");
 				return;
 			}
-			const agent = registry.get(ctx.cwd);
+			// Devin advertises its modes and config options only in the
+			// `session/new` reply, so there is nothing to pick from until a session
+			// exists. Start one for the setting verbs rather than reporting an
+			// empty list — `/devin model` before the first tool call is the normal
+			// way to choose a model.
+			const settingVerb = verb === "mode" || verb === "model" || verb === "effort";
+			let agent = registry.get(ctx.cwd);
 			if (!agent?.alive) {
-				ctx.ui.notify("No live Devin session in this directory", "info");
-				return;
+				if (!settingVerb) {
+					ctx.ui.notify("No live Devin session in this directory", "info");
+					return;
+				}
+				ctx.ui.setStatus("devin-acp", "Starting Devin session…");
+				try {
+					agent = await registry.acquire(ctx.cwd, logger, {}, false);
+				} catch (error) {
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+					return;
+				} finally {
+					ctx.ui.setStatus("devin-acp", undefined);
+				}
 			}
-			if (verb === "mode" && value) {
-				await agent.setMode(value);
-				ctx.ui.notify(`Devin mode: ${value}`, "info");
+			if (verb === "mode") {
+				const chosen = value ?? (await choose(ctx, "Devin mode", agent.availableModes, agent.mode));
+				if (!chosen) return;
+				await apply(ctx, `Devin mode: ${chosen}`, () => agent.setMode(chosen));
 				return;
 			}
 			// `model` and `effort` are both session config options; Devin names the
 			// effort axis `thought_level`.
 			const configId = verb === "model" ? "model" : verb === "effort" ? "thought_level" : undefined;
-			if (configId && value) {
-				await agent.setConfigOption(configId, value);
-				ctx.ui.notify(`Devin ${verb}: ${value}`, "info");
+			if (configId) {
+				const chosen =
+					value ??
+					(await choose(ctx, `Devin ${verb}`, agent.configValues(configId), agent.configValue(configId)));
+				if (!chosen) return;
+				await apply(ctx, `Devin ${verb}: ${chosen}`, () => agent.setConfigOption(configId, chosen));
 				return;
 			}
 			const models = agent.configValues("model");

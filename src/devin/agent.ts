@@ -191,6 +191,11 @@ export class DevinAgent {
 		);
 	}
 
+	/** Mode ids this session advertises, empty when the agent exposes no modes. */
+	get availableModes(): string[] {
+		return this.#availableModes;
+	}
+
 	/** Allowed values of a session config option, e.g. `model` or `thought_level`. */
 	configValues(optionId: string): string[] {
 		const option = this.#configOptions.find(candidate => candidate.id === optionId);
