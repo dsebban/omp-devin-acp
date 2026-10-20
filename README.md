@@ -4,6 +4,8 @@ Delegate coding tasks from [omp](https://github.com/can1357/oh-my-pi) to the **D
 
 This is an out-of-tree omp extension: it installs no patches into oh-my-pi and ships its own ACP client, because out-of-tree extensions cannot resolve host subpath packages such as `@oh-my-pi/pi-utils/acp` from a compiled omp binary.
 
+Current release: **v0.2.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes and [AGENTS.md](AGENTS.md) for coding-agent guidance.
+
 ## What it adds
 
 | Surface | Name | Behavior |
@@ -49,12 +51,46 @@ omp plugin uninstall omp-devin-acp
 
 bun caches git dependencies, so a reinstall on a machine that already fetched this repo can restore the cached revision instead of current `main`; `omp plugin upgrade` forces the refetch.
 
+After upgrading, run `/restart` in each open omp session to load the new extension while resuming the conversation. An already running process retains its loaded code; `/mcp reload` reloads MCP tools, not this extension.
+
+### Migrating from v0.1.0
+
+Provider model names now identify families: replace saved provider selectors such as `devin/gpt-6-1-sol-medium` with `devin/gpt-6-1-sol`. Check `modelRoles` in `~/.omp/agent/config.yml`, launch flags, and saved shortcuts. Keep `enabledModels: devin/*` if you already use it. After `/restart`, select the new name with `/model` if a resumed session still references the old one. Do not delete conversation history or clear databases to migrate.
+
+```sh
+omp models refresh
+omp models devin
+omp --model devin/gpt-6-1-sol --thinking medium
+```
+
+This rename applies to omp provider selectors only. `/devin model`, the `devin` tool's `model` argument, and `OMP_DEVIN_MODEL` still take the exact wire ids advertised by Devin (which can include an effort suffix).
+
 For development against a working copy, skip the install and link or load the source directly:
 
 ```sh
 omp plugin link ~/dev/omp-devin-acp          # or
 omp -e ~/dev/omp-devin-acp/src/index.ts      # single run
 ```
+
+## Verification And Troubleshooting
+
+Run `bun run check` for the TypeScript check. For a real integration check, use an authenticated Devin CLI and `omp -e ./src/index.ts` from this checkout; avoid simultaneously loading a second installed copy of the extension. A model turn can incur Devin charges and can act in the selected directory.
+
+| Feature | How to reach or drive it | Observable proof |
+|---|---|---|
+| Catalog | `omp models devin` (or refresh first) | Family ids, available efforts, and context/output limits; roster size is account-specific. |
+| Provider and effort | `omp --model devin/gpt-6-1-sol --thinking high` | A completed reply; provider log records the selected `wireModel`, `thoughtLevel`, and `end_turn`. Use an available model if this example is absent. |
+| History replay | Start on another provider, supply a unique codeword, then switch using `/model` and ask for it | Correct recall; first provider completion records `replayed > 0`. Subsequent uninterrupted Devin turns normally record `replayed: 0`. |
+| Tool activity | Ask Devin to list a disposable directory | Finished tool activity appears in the thinking block, with a final answer; completion log records tool calls. |
+| Usage | Complete a provider turn | Saved omp assistant message has token counts and estimated cost; compare with catalog rates, not ACU billing. |
+| Commands and lifecycle | `/devin status`, advertised mode/model/effort pickers, `/devin reset` | Status reflects selections; reset stops the owned session and the next turn creates a new one. |
+| Cancellation | Cancel an active turn | Partial output is retained and the turn ends as `aborted`. |
+
+omp logs are under `~/.omp/logs/`; Devin CLI logs are under `~/.local/share/devin/cli/logs/` with the default data directory. Match the active omp pid and its Devin child rather than reading an old probe's log. `devin-acp: initialized` proves the handshake, and `devin-acp: provider turn complete` records model, effort, history replay, tool count, elapsed time, and stop reason. Inspect the saved omp message for token usage and pricing. Do not publish raw logs: they can contain prompts, commands, and private paths.
+
+Observed non-fatal warnings are not a blanket health check: a feature-flag refresh timeout explicitly keeping a last-good value is different from an ACP disconnect or model-request failure. Skill-discovery errors can mean missing skills even when ordinary turns work. A project-local custom-tool load failure or Tern frame-acknowledgement warning belongs to that surface, not automatically to this provider. Diagnose each warning before claiming the whole environment is healthy.
+
+Live validation on 2026-10-20 with omp 18.12.3 and Devin 3000.11.92 confirmed the updated family selector, medium effort, 88 replayed messages, normal completion in 3.3 s, saved token counts, and a nonzero estimated cost. Earlier installed-copy checks covered high effort, mid-conversation switching, streamed tool activity, and a cold catalog in about 9 s. The on-screen Tern model picker was not directly verified.
 
 ## Configuration
 

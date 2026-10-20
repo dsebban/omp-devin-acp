@@ -1,6 +1,6 @@
 {
 	"name": "omp-devin-acp",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"private": true,
 	"description": "Delegate coding tasks from omp to the Devin CLI agent over the Agent Client Protocol",
 	"type": "module",
@@ -10,7 +10,10 @@
 		"url": "git+ssh://git@github.com/dsebban/omp-devin-acp.git"
 	},
 	"keywords": ["omp", "omp-plugin", "devin", "acp", "agent-client-protocol"],
-	"files": ["src", "README.md"],
+	"files": ["src", "README.md", "AGENTS.md", "CHANGELOG.md"],
+	"scripts": {
+		"check": "tsc --noEmit"
+	},
 	"omp": {
 		"name": "devin-acp",
 		"description": "Delegate coding tasks from omp to the Devin CLI agent over the Agent Client Protocol",
