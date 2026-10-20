@@ -3,6 +3,7 @@ import { AcpMethodNotFound, AcpPeer, AcpRpcError } from "../acp/peer";
 import {
 	ACP_PROTOCOL_VERSION,
 	type ClientCapabilities,
+	type ContentBlock,
 	type InitializeResponse,
 	type NewSessionResponse,
 	type PromptResponse,
@@ -12,7 +13,7 @@ import {
 	type SessionNotification,
 } from "../acp/types";
 import { type DevinLaunchConfig, prepareLaunch } from "./launch";
-import { type TurnDetails, TurnTranscript } from "./transcript";
+import { blockText, type TurnDetails, TurnTranscript } from "./transcript";
 
 /** Structural subset of `pi.logger` so the driver stays host-independent. */
 export interface DevinLogger {
@@ -35,6 +36,12 @@ export interface DevinPromptOptions {
 	signal?: AbortSignal;
 	/** Called on every streamed update with a compact live view. */
 	onActivity?: (view: string, details: TurnDetails) => void;
+	/**
+	 * Called with each message or thought chunk as Devin emits it. Separate from
+	 * `onActivity`, which reports a folded snapshot: a provider streaming into an
+	 * omp assistant message needs the raw increments, not a re-rendered view.
+	 */
+	onChunk?: (kind: "text" | "thought", chunk: string) => void;
 	resolvePermission?: DevinPermissionResolver;
 }
 
@@ -318,6 +325,7 @@ export class DevinAgent {
 		this.#turnSettled = settled.promise;
 		this.#resolvePermission = options.resolvePermission;
 		this.#permissionAborter = new AbortController();
+		this.#chunkListener = options.onChunk;
 		const emit = options.onActivity;
 		let lastView = "";
 		const onUpdate = () => {
@@ -360,6 +368,7 @@ export class DevinAgent {
 			this.#turnSettled = undefined;
 			this.#resolvePermission = undefined;
 			this.#permissionAborter = undefined;
+			this.#chunkListener = undefined;
 			settled.resolve();
 		}
 	}
@@ -403,6 +412,7 @@ export class DevinAgent {
 	}
 
 	#turnListeners = new Set<() => void>();
+	#chunkListener: ((kind: "text" | "thought", chunk: string) => void) | undefined;
 
 	#onTurnUpdate(listener: () => void): () => void {
 		this.#turnListeners.add(listener);
@@ -422,6 +432,16 @@ export class DevinAgent {
 		}
 		if (notification.update.sessionUpdate === "current_mode_update") {
 			this.#mode = (notification.update as { currentModeId?: string }).currentModeId ?? this.#mode;
+		}
+		const chunkKind =
+			notification.update.sessionUpdate === "agent_message_chunk"
+				? "text"
+				: notification.update.sessionUpdate === "agent_thought_chunk"
+					? "thought"
+					: undefined;
+		if (chunkKind && this.#chunkListener) {
+			const chunk = blockText((notification.update as { content?: ContentBlock }).content);
+			if (chunk) this.#chunkListener(chunkKind, chunk);
 		}
 		this.#activeTurn?.apply(notification.update);
 		for (const listener of this.#turnListeners) listener();

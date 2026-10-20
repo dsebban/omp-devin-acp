@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { RequestPermissionRequest } from "./acp/types";
 import { DevinAgent, type DevinLogger } from "./devin/agent";
 import { type DevinLaunchOverrides, resolveLaunchConfig } from "./devin/launch";
+import { devinProviderConfig, PROVIDER_NAME } from "./devin/provider";
 import { statusMark, type TurnDetails } from "./devin/transcript";
 
 /** Validated arguments of the `devin` tool; mirrors its parameter schema. */
@@ -167,7 +168,22 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 
 	pi.setLabel("Devin (ACP)");
 
+	// Devin's own models, selectable from `/model`. The provider shares the
+	// per-directory session registry with the tool, so switching to a Devin model
+	// continues whatever session the tool already started here.
+	pi.registerProvider(
+		PROVIDER_NAME,
+		devinProviderConfig({
+			logger,
+			cwd: () => process.cwd(),
+			acquire: (cwd, signal) => registry.acquire(cwd, logger, {}, false, signal),
+			probe: () => DevinAgent.start(process.cwd(), resolveLaunchConfig({}), logger),
+		}),
+	);
+	logger.debug("devin-acp: provider registered", { provider: PROVIDER_NAME });
+
 	pi.on("session_shutdown", async () => {
+		pi.unregisterProvider(PROVIDER_NAME);
 		await registry.disposeAll();
 	});
 

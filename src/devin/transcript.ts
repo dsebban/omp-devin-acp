@@ -36,7 +36,7 @@ export function statusMark(status: string): string {
 const TAIL_LIMIT = 2048;
 const ACTIVITY_LIMIT = 64;
 
-function blockText(content: ContentBlock | undefined): string {
+export function blockText(content: ContentBlock | undefined): string {
 	if (!content) return "";
 	if (typeof content.text === "string") return content.text;
 	return "";

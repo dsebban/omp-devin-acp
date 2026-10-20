@@ -10,10 +10,17 @@ This is an out-of-tree omp extension: it installs no patches into oh-my-pi and s
 |---|---|---|
 | Tool | `devin` | Runs one Devin turn in the session's cwd. Streams Devin's tool activity into omp's tool preview and returns its final answer. |
 | Command | `/devin` | Session status (session id, mode, model, effort). `/devin mode`, `/devin model`, `/devin effort` open a picker of the values Devin advertises, with the active one marked; append an id (`/devin model swe-2-high`) to set it without the dialog. `/devin reset` drops the session. |
+| Provider | `devin/<model>` | Devin's own models in omp's `/model` picker. Selecting one routes every omp turn through a Devin ACP session instead of a completion endpoint. |
 
 Devin keeps its own tool loop: it reads, edits, and executes with its own tools, in the omp session's working directory. Consecutive `devin` tool calls reuse one live ACP session per directory, so follow-up prompts keep Devin's context.
 
-omp's own `/model` picker will never list Devin's models, by design. Those 94 ids are session config options living inside the Devin process — Devin reports them in its `session/new` reply and owns the inference — while `/model` lists omp's catalog of providers it calls directly. This extension registers a *tool*, not a provider, because an ACP session runs its own agent loop and cannot be driven as a completion endpoint. `/devin model` is the equivalent picker.
+Picking a `devin/<id>` model (`/model`, or `omp --model devin/gpt-6-1-sol-medium`) hands the whole turn to Devin: it plans, edits, and runs commands with its own tools, and omp renders the streamed answer as a normal assistant message. The provider and the `devin` tool share one session per directory, so switching to a Devin model continues whatever session the tool already started — and `/devin status` still reports it.
+
+- The catalog comes from the live binary: `fetchDynamicModels` starts a throwaway session and returns the `model` config option's values, cached in omp's model DB for 24 h (`omp models devin` lists them, `omp models refresh` refetches). Devin's roster is account-specific and changes.
+- omp effort maps onto Devin's `thought_level` (`off`/`minimal`/`min` → `low`, then `low|medium|high|xhigh|max` verbatim). Model ids carry their own level as a suffix, so the provider sets the model first and applies effort second.
+- Cost and usage read zero: Devin bills per ACU and reports no per-turn price. The 200K context window is omp's transcript budget for the delegated conversation, not Devin's — Devin compacts its own history.
+- An `enabledModels` whitelist in `~/.omp/agent/config.yml` hides the provider from `/model` and from `omp models` until it lists `devin/*`; an explicit `--model devin/<id>` selector still works.
+- Cancelling a turn ends the stream as `aborted` with the text Devin had already streamed; Devin's own cancel acknowledgement can take a few seconds.
 
 Sessions are scoped to the omp session that started them, not to the module: a subagent gets its own Devin session, and its teardown never touches the parent's. Each omp session's Devin processes stop on `session_shutdown`.
 
@@ -93,7 +100,7 @@ Established against `devin` 3000.11.92 by driving the real binary:
 
 - `devin acp` speaks newline-delimited JSON-RPC 2.0 at `protocolVersion: 1`; `agentInfo` is `{name: "affogato", title: "Devin Agent"}`.
 - Client capabilities are declared `fs: {readTextFile: false, writeTextFile: false}, terminal: false` on purpose. Advertising `terminal: true` makes Devin route shell work through `terminal/create`; with no client terminal implementation the turn degrades with "the terminal failed to start".
-- `session/set_model` returns `-32601`. Model, effort, and speed are `session/set_config_option` values (`model`, `thought_level`, `speed`); a fresh session advertises 94 model ids. That request names the option `configId`, not `optionId` — sending `optionId` fails with `-32602 missing field \`configId\``. Its reply carries the refreshed `configOptions` array and is the only refresh source: Devin emits no `config_option_update` notification for an option the client set itself, so a client that ignores the reply reports stale values forever.
+- `session/set_model` returns `-32601`. Model, effort, and speed are `session/set_config_option` values (`model`, `thought_level`, `speed`); a fresh session advertises the account's whole model roster (78 ids when last measured, 94 a day earlier — it changes). That request names the option `configId`, not `optionId` — sending `optionId` fails with `-32602 missing field \`configId\``. Its reply carries the refreshed `configOptions` array and is the only refresh source: Devin emits no `config_option_update` notification for an option the client set itself, so a client that ignores the reply reports stale values forever.
 - Agent→client requests may serialize `id` after `method`, so messages are classified by field presence, not key order.
 - `session/cancel` is a notification; the in-flight `session/prompt` then resolves with `stopReason: "cancelled"`.
 - Devin's stderr carries INFO tracing: noise goes to omp's debug log, other lines are logged at `warn`, and the last 20 non-noise lines are attached to transport and startup errors (a rejected flag kills the child before it speaks ACP, so stderr is the only diagnosis).
@@ -109,5 +116,6 @@ src/acp/peer.ts       bidirectional NDJSON JSON-RPC peer
 src/devin/launch.ts   argv/env resolution, MCP isolation overlay
 src/devin/agent.ts    spawn, initialize, session lifecycle, prompt, cancel
 src/devin/transcript.ts  session/update folding: live view, text, details
-src/index.ts          extension factory: tool, command, teardown
+src/devin/provider.ts    omp provider: Devin's models in `/model`, turn streaming
+src/index.ts          extension factory: tool, command, provider, teardown
 ```
