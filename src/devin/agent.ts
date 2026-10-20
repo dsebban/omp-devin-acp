@@ -13,7 +13,7 @@ import {
 	type SessionNotification,
 } from "../acp/types";
 import { type DevinLaunchConfig, prepareLaunch } from "./launch";
-import { blockText, type TurnDetails, TurnTranscript } from "./transcript";
+import { blockText, type TurnDetails, TurnTranscript, toolCallLine } from "./transcript";
 
 /** Structural subset of `pi.logger` so the driver stays host-independent. */
 export interface DevinLogger {
@@ -31,17 +31,23 @@ export type DevinPermissionResolver = (
 	signal: AbortSignal,
 ) => Promise<string | undefined>;
 
+/** `tool` chunks are one settled tool call, rendered as `✓ <title>` / `✗ <title>`. */
+export type DevinChunkKind = "text" | "thought" | "tool";
+
+const TOOL_DONE = new Set(["completed", "failed"]);
+
 export interface DevinPromptOptions {
 	prompt: string;
 	signal?: AbortSignal;
 	/** Called on every streamed update with a compact live view. */
 	onActivity?: (view: string, details: TurnDetails) => void;
 	/**
-	 * Called with each message or thought chunk as Devin emits it. Separate from
-	 * `onActivity`, which reports a folded snapshot: a provider streaming into an
-	 * omp assistant message needs the raw increments, not a re-rendered view.
+	 * Called with each message or thought chunk as Devin emits it, and once per
+	 * settled tool call. Separate from `onActivity`, which reports a folded
+	 * snapshot: a provider streaming into an omp assistant message needs the raw
+	 * increments, not a re-rendered view.
 	 */
-	onChunk?: (kind: "text" | "thought", chunk: string) => void;
+	onChunk?: (kind: DevinChunkKind, chunk: string) => void;
 	resolvePermission?: DevinPermissionResolver;
 }
 
@@ -412,7 +418,7 @@ export class DevinAgent {
 	}
 
 	#turnListeners = new Set<() => void>();
-	#chunkListener: ((kind: "text" | "thought", chunk: string) => void) | undefined;
+	#chunkListener: ((kind: DevinChunkKind, chunk: string) => void) | undefined;
 
 	#onTurnUpdate(listener: () => void): () => void {
 		this.#turnListeners.add(listener);
@@ -443,7 +449,22 @@ export class DevinAgent {
 			const chunk = blockText((notification.update as { content?: ContentBlock }).content);
 			if (chunk) this.#chunkListener(chunkKind, chunk);
 		}
-		this.#activeTurn?.apply(notification.update);
+		const update = notification.update;
+		const rawToolCallId =
+			update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
+				? update.toolCallId
+				: undefined;
+		const toolCallId = typeof rawToolCallId === "string" ? rawToolCallId : undefined;
+		const statusBefore = toolCallId ? this.#activeTurn?.toolCall(toolCallId)?.status : undefined;
+		this.#activeTurn?.apply(update);
+		if (toolCallId && this.#chunkListener) {
+			const call = this.#activeTurn?.toolCall(toolCallId);
+			// One line per call, when it settles: the first update usually carries a
+			// generic title ("exec"), the final one says what happened ("Listed ./").
+			if (call && call.status !== statusBefore && TOOL_DONE.has(call.status)) {
+				this.#chunkListener("tool", toolCallLine(call));
+			}
+		}
 		for (const listener of this.#turnListeners) listener();
 	}
 

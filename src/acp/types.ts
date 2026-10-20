@@ -109,11 +109,12 @@ export interface PlanEntry {
 	priority?: string;
 }
 
+/** Devin reports `inputTokens` inclusive of both cache counters. */
 export interface TokenUsage {
 	totalTokens?: number;
 	inputTokens?: number;
 	outputTokens?: number;
-	cachedInputTokens?: number;
+	cachedReadTokens?: number;
 	cachedWriteTokens?: number;
 }
 

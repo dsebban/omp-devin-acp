@@ -143,7 +143,7 @@ export class TurnTranscript {
 		const lines: string[] = [];
 		for (const id of this.#recent.slice(-maxActivity)) {
 			const call = this.#toolCalls.get(id);
-			if (call) lines.push(`${statusMark(call.status)} ${call.tool ?? call.kind}: ${call.title}`);
+			if (call) lines.push(toolCallLine(call));
 		}
 		const text = this.#tail.trim();
 		if (text) {
@@ -153,6 +153,10 @@ export class TurnTranscript {
 			lines.push("Devin is working…");
 		}
 		return lines.join("\n");
+	}
+
+	toolCall(id: string): TurnToolCall | undefined {
+		return this.#toolCalls.get(id);
 	}
 
 	text(): string {
@@ -170,4 +174,9 @@ export class TurnTranscript {
 			thoughtChars: this.#thoughtChars,
 		};
 	}
+}
+
+/** `✓ exec: Listed ./` — one line per tool call, shared by the live view and the provider stream. */
+export function toolCallLine(call: TurnToolCall): string {
+	return `${statusMark(call.status)} ${call.tool ?? call.kind}: ${call.title}`;
 }

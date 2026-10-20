@@ -14,11 +14,12 @@ This is an out-of-tree omp extension: it installs no patches into oh-my-pi and s
 
 Devin keeps its own tool loop: it reads, edits, and executes with its own tools, in the omp session's working directory. Consecutive `devin` tool calls reuse one live ACP session per directory, so follow-up prompts keep Devin's context.
 
-Picking a `devin/<id>` model (`/model`, or `omp --model devin/gpt-6-1-sol-medium`) hands the whole turn to Devin: it plans, edits, and runs commands with its own tools, and omp renders the streamed answer as a normal assistant message. The provider and the `devin` tool share one session per directory, so switching to a Devin model continues whatever session the tool already started — and `/devin status` still reports it.
+Picking a `devin/<id>` model (`/model`, or `omp --model devin/gpt-6-1-sol`) hands the whole turn to Devin: it plans, edits, and runs commands with its own tools, and omp renders the streamed answer as a normal assistant message, with each finished Devin tool call as a `✓ exec: …` line as it happens. The provider and the `devin` tool share one session per directory, so switching to a Devin model continues whatever session the tool already started — and `/devin status` still reports it.
 
-- The catalog comes from the live binary: `fetchDynamicModels` starts a throwaway session and returns the `model` config option's values, cached in omp's model DB for 24 h (`omp models devin` lists them, `omp models refresh` refetches). Devin's roster is account-specific and changes.
-- omp effort maps onto Devin's `thought_level` (`off`/`minimal`/`min` → `low`, then `low|medium|high|xhigh|max` verbatim). Model ids carry their own level as a suffix, so the provider sets the model first and applies effort second.
-- Cost and usage read zero: Devin bills per ACU and reports no per-turn price. The 200K context window is omp's transcript budget for the delegated conversation, not Devin's — Devin compacts its own history.
+- The catalog comes from the live binary and is cached in omp's model DB for 24 h (`omp models devin` lists it, `omp models refresh` refetches). Devin's roster is account-specific and changes. Two sources feed it: the ACP `model` option (what Devin accepts) and `devin models list --format json` (prices, context windows, labels). Reading each model's levels costs one ~0.5 s `set_config_option` round trip, and omp drops a model fetch after 15 s, so the extension starts 8 probe sessions and spreads the models across them (82 models: 29 s serial, 9 s parallel).
+- One omp model per Devin family: `gpt-6-1-sol`, not `gpt-6-1-sol-medium`. The suffix on Devin's ids is only the family's default level, so the omp row carries the family's real level set as efforts and the effort control picks the level (`swe-2`: medium/high/max; GPT and recent Claude: low through max). Devin's `none` level is omp's `minimal`. Families with no levels (`claude-opus-4-6`) get no effort control; omp's own rules collapse such pairs (`claude-opus-4-6` + `claude-opus-4-6-thinking`) into one row whose effort routes to the sibling id, and the provider follows that route.
+- Usage is priced: Devin reports token counts per turn (`usage_update`, input inclusive of cache reads and writes) and the catalog carries Devin's per-million rates, so omp shows a real turn cost. omp's pricing rules may fill rates Devin's summary omits (cache write, long context). Devin itself bills in ACUs; the omp figure is a token-rate estimate.
+- A Devin session that has not seen the conversation (the first Devin turn after other models answered, a new or reset session, a resumed omp session) receives the earlier transcript once, inside a `<omp-transcript>` block ahead of the request, so it doesn't re-investigate what omp already established. Later turns send only the new user message.
 - An `enabledModels` whitelist in `~/.omp/agent/config.yml` hides the provider from `/model` and from `omp models` until it lists `devin/*`; an explicit `--model devin/<id>` selector still works.
 - Cancelling a turn ends the stream as `aborted` with the text Devin had already streamed; Devin's own cancel acknowledgement can take a few seconds.
 
@@ -116,6 +117,8 @@ src/acp/peer.ts       bidirectional NDJSON JSON-RPC peer
 src/devin/launch.ts   argv/env resolution, MCP isolation overlay
 src/devin/agent.ts    spawn, initialize, session lifecycle, prompt, cancel
 src/devin/transcript.ts  session/update folding: live view, text, details
-src/devin/provider.ts    omp provider: Devin's models in `/model`, turn streaming
+src/devin/catalog.ts     model catalog: parallel level probe, CLI prices and limits
+src/devin/history.ts     replays omp's transcript into a session that has not seen it
+src/devin/provider.ts    omp provider: Devin's models in `/model`, turn streaming, cost
 src/index.ts          extension factory: tool, command, provider, teardown
 ```

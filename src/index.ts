@@ -178,6 +178,7 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 			cwd: () => process.cwd(),
 			acquire: (cwd, signal) => registry.acquire(cwd, logger, {}, false, signal),
 			probe: () => DevinAgent.start(process.cwd(), resolveLaunchConfig({}), logger),
+			binary: () => resolveLaunchConfig({}).binary,
 		}),
 	);
 	logger.debug("devin-acp: provider registered", { provider: PROVIDER_NAME });
