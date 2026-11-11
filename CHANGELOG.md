@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Auto-approve every Devin `session/request_permission` with `allow_once`, falling back to `allow_always` only when it is the sole allow option. Previously the `/model` provider path answered every request `cancelled`, and the `devin` tool cancelled or rejected whenever omp's dialog was unavailable or dismissed, so Devin silently dropped those tool calls. Requests are still answered `cancelled` after a turn is cancelled.
+
 ## 0.2.0 - 2026-10-20
 
 - Expose one omp provider model per Devin family, with advertised effort levels and host effort routing.

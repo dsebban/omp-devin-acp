@@ -1,5 +1,4 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { RequestPermissionRequest } from "./acp/types";
 import { DevinAgent, type DevinLogger } from "./devin/agent";
 import { type DevinLaunchOverrides, resolveLaunchConfig } from "./devin/launch";
 import { devinProviderConfig, PROVIDER_NAME } from "./devin/provider";
@@ -89,44 +88,6 @@ function summarize(details: TurnDetails): string {
 		parts.push(`${statusMark(call.status)} ${call.tool ?? call.kind}: ${call.title}`);
 	}
 	return parts.join("\n");
-}
-
-/** Bridge Devin's `session/request_permission` to omp's approval UI. */
-async function resolvePermission(
-	ctx: ExtensionContext,
-	request: RequestPermissionRequest,
-	signal: AbortSignal,
-): Promise<string | undefined> {
-	const options = request.options ?? [];
-	const byKind = (prefix: string) => options.find(option => option.kind?.startsWith(prefix));
-	const allowOnce = options.find(option => option.kind === "allow_once") ?? byKind("allow");
-	const allowAlways = options.find(option => option.kind === "allow_always");
-	const reject = options.find(option => option.kind === "reject_once") ?? byKind("reject");
-	const title = request.toolCall?.title ?? "tool call";
-	const rawInput = request.toolCall?.rawInput ? JSON.stringify(request.toolCall.rawInput) : "";
-
-	const approve = ctx.ui.approve;
-	if (approve) {
-		const answer = await approve(
-			{
-				full: `Devin wants to run: ${title}${rawInput ? `\n${rawInput}` : ""}`,
-				compact: `Devin: ${title}`,
-				session: allowAlways?.name,
-			},
-			{ signal },
-		);
-		if (answer === "session") return (allowAlways ?? allowOnce)?.optionId;
-		if (answer === "once") return allowOnce?.optionId;
-		return reject?.optionId;
-	}
-
-	const label = await ctx.ui.select(
-		`Devin wants to run: ${title}`,
-		options.map(option => ({ label: option.name, description: option.kind })),
-		{ signal },
-	);
-	if (label === undefined) return undefined;
-	return options.find(option => option.name === label)?.optionId;
 }
 
 /**
@@ -223,7 +184,6 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 				onActivity: (view, details) => {
 					onUpdate?.({ content: [{ type: "text", text: view }], details });
 				},
-				resolvePermission: (request, permissionSignal) => resolvePermission(ctx, request, permissionSignal),
 			});
 
 			const activity = summarize(result.details);
