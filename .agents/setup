@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Amp orb setup: install the dependencies `bun run check` needs, matching CI.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+step() {
+	local start=$SECONDS
+	echo "==> $*"
+	"$@"
+	echo "<== $1 done in $((SECONDS - start))s"
+}
+
+# Bun ships in the orb base image.
+bun --version
+
+# Lockfile-exact; a warm snapshot's node_modules makes this a no-op check.
+step bun install --frozen-lockfile
