@@ -105,18 +105,27 @@ async function resolvePermission(
 	request: RequestPermissionRequest,
 	signal: AbortSignal,
 ): Promise<string | undefined> {
-	const title = request.toolCall?.title ?? "tool call";
+	// Devin's request can omit `title` and `rawInput`; the command and the
+	// permission pattern it matches (`Exec(rm)`, present with or without a rule)
+	// arrive only in `_meta` (measured, devin 3000.12.43).
+	const meta = request.toolCall?._meta ?? {};
+	const rawCommand = request.toolCall?.rawInput?.command ?? meta["cognition.ai/editableCommand"];
+	const command = typeof rawCommand === "string" ? rawCommand : undefined;
+	const rawPattern = meta["cognition.ai/permissionRule"];
+	const pattern = typeof rawPattern === "string" ? rawPattern : undefined;
+	const title = request.toolCall?.title ?? command ?? "tool call";
 	const options = request.options ?? [];
 	if (!ctx?.hasUI) {
 		// Like omp's own approvals, a prompt with nobody to answer it fails closed.
 		logger.warn("devin-acp: Devin asked for permission but omp has no interactive UI; refused", {
 			title,
+			command,
+			pattern,
 			hint: "allow it in Devin's config permissions, or set OMP_DEVIN_SESSION_MODE",
 		});
 		return undefined;
 	}
-	const command = request.toolCall?.rawInput?.command;
-	const detail = typeof command === "string" && !title.includes(command) ? `\n${command}` : "";
+	const detail = command && !title.includes(command) ? `\n${command}` : "";
 	const label = await ctx.ui.select(
 		`Devin wants to run: ${title}${detail}`,
 		options.map(option => ({ label: option.name, description: option.kind })),
