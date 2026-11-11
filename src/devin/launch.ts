@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,10 +7,16 @@ import * as path from "node:path";
 export interface DevinLaunchConfig {
 	/** `devin` binary path. */
 	binary: string;
-	/** CLI permission floor: `auto` | `accept-edits` | `smart` | `dangerous`. */
-	permissionMode: string;
-	/** ACP session mode applied after `session/new`: `accept-edits` | `smart` | `ask` | `plan`. */
-	sessionMode: string;
+	/** CLI permission floor, passed as `--permission-mode` only when set; unset, Devin reads its own config. */
+	permissionMode?: string;
+	/** ACP session mode the caller asked for; an unknown id is an error. */
+	sessionMode?: string;
+	/**
+	 * ACP session mode matching Devin's own `permission_mode` (config file or
+	 * `DEVIN_PERMISSION_MODE`). Devin's ACP server ignores that setting and always
+	 * starts in `accept-edits`, so the extension applies it — when advertised.
+	 */
+	configuredSessionMode?: string;
 	/** Value for the `model` session config option (Devin has no `session/set_model`). */
 	model?: string;
 	/** Value for the `thought_level` session config option. */
@@ -35,8 +42,17 @@ export interface DevinLaunchOverrides {
 	thoughtLevel?: string;
 }
 
-const DEFAULT_PERMISSION_MODE = "auto";
-const DEFAULT_SESSION_MODE = "accept-edits";
+/**
+ * Devin's `permission_mode` values and the ACP session mode each corresponds to.
+ * ACP has no mode that prompts for workspace edits, so `normal`/`auto` keep
+ * Devin's ACP default (`accept-edits`).
+ */
+const SESSION_MODE_FOR_PERMISSION_MODE: Record<string, string | undefined> = {
+	"accept-edits": "accept-edits",
+	smart: "smart",
+	dangerous: "bypass",
+	bypass: "bypass",
+};
 /** Temp-dir prefix and owner marker of the MCP isolation overlays. */
 const OVERLAY_PREFIX = "omp-devin-acp-";
 const OWNER_FILE = ".omp-owner";
@@ -51,10 +67,14 @@ function envFlag(name: string, fallback: boolean): boolean {
 
 export function resolveLaunchConfig(overrides: DevinLaunchOverrides = {}): DevinLaunchConfig {
 	const binary = process.env.OMP_DEVIN_BIN || Bun.which("devin") || "devin";
+	const permissionMode = overrides.permissionMode ?? (process.env.OMP_DEVIN_PERMISSION_MODE || undefined);
+	// Same precedence as Devin's own `--permission-mode`: flag, env, config file.
+	const devinPermissionMode = permissionMode ?? (process.env.DEVIN_PERMISSION_MODE || devinConfigPermissionMode());
 	return {
 		binary,
-		permissionMode: overrides.permissionMode ?? process.env.OMP_DEVIN_PERMISSION_MODE ?? DEFAULT_PERMISSION_MODE,
-		sessionMode: overrides.sessionMode ?? process.env.OMP_DEVIN_SESSION_MODE ?? DEFAULT_SESSION_MODE,
+		permissionMode,
+		sessionMode: overrides.sessionMode ?? (process.env.OMP_DEVIN_SESSION_MODE || undefined),
+		configuredSessionMode: devinPermissionMode ? SESSION_MODE_FOR_PERMISSION_MODE[devinPermissionMode] : undefined,
 		model: overrides.model ?? process.env.OMP_DEVIN_MODEL ?? undefined,
 		thoughtLevel: overrides.thoughtLevel ?? process.env.OMP_DEVIN_THOUGHT_LEVEL ?? undefined,
 		isolateMcp: envFlag("OMP_DEVIN_ISOLATE_MCP", true),
@@ -64,6 +84,18 @@ export function resolveLaunchConfig(overrides: DevinLaunchOverrides = {}): Devin
 
 function userConfigRoot(): string {
 	return process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+}
+
+/** `permission_mode` from Devin's user config (JSON with comments); a user-only setting. */
+function devinConfigPermissionMode(): string | undefined {
+	try {
+		const text = readFileSync(path.join(userConfigRoot(), "devin", "config.json"), "utf8");
+		const value = (Bun.JSONC.parse(text) as { permission_mode?: unknown } | null)?.permission_mode;
+		return typeof value === "string" ? value : undefined;
+	} catch {
+		// No config file, or one Devin itself would reject: Devin's defaults apply.
+		return undefined;
+	}
 }
 
 /**
@@ -142,7 +174,8 @@ async function readdirSafe(dir: string): Promise<string[]> {
 }
 
 export async function prepareLaunch(config: DevinLaunchConfig): Promise<PreparedLaunch> {
-	const argv = [config.binary, "--permission-mode", config.permissionMode];
+	const argv = [config.binary];
+	if (config.permissionMode) argv.push("--permission-mode", config.permissionMode);
 	if (!config.respectWorkspaceTrust) argv.push("--respect-workspace-trust", "false");
 	argv.push("acp");
 

@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { RequestPermissionRequest } from "./acp/types";
 import { DevinAgent, type DevinLogger } from "./devin/agent";
 import { type DevinLaunchOverrides, resolveLaunchConfig } from "./devin/launch";
 import { devinProviderConfig, PROVIDER_NAME } from "./devin/provider";
@@ -90,6 +91,40 @@ function summarize(details: TurnDetails): string {
 	return parts.join("\n");
 }
 
+/** Latest omp context with a UI, shared by every binding of this module (see `remember`). */
+let interactiveContext: ExtensionContext | undefined;
+
+/**
+ * Ask the user about a tool call Devin's own rules left to a prompt, offering
+ * Devin's own choices (once, session, project, always, reject), so a grant is
+ * scoped and persisted exactly as it would be in Devin's TUI.
+ */
+async function resolvePermission(
+	ctx: ExtensionContext | undefined,
+	logger: DevinLogger,
+	request: RequestPermissionRequest,
+	signal: AbortSignal,
+): Promise<string | undefined> {
+	const title = request.toolCall?.title ?? "tool call";
+	const options = request.options ?? [];
+	if (!ctx?.hasUI) {
+		// Like omp's own approvals, a prompt with nobody to answer it fails closed.
+		logger.warn("devin-acp: Devin asked for permission but omp has no interactive UI; refused", {
+			title,
+			hint: "allow it in Devin's config permissions, or set OMP_DEVIN_SESSION_MODE",
+		});
+		return undefined;
+	}
+	const command = request.toolCall?.rawInput?.command;
+	const detail = typeof command === "string" && !title.includes(command) ? `\n${command}` : "";
+	const label = await ctx.ui.select(
+		`Devin wants to run: ${title}${detail}`,
+		options.map(option => ({ label: option.name, description: option.kind })),
+		{ signal },
+	);
+	return options.find(option => option.name === label)?.optionId;
+}
+
 /**
  * Let the user pick one of Devin's advertised values, marking the active one.
  *
@@ -126,6 +161,15 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 	const z = pi.zod;
 	const logger: DevinLogger = pi.logger;
 	const registry = new DevinSessionRegistry();
+	// The provider path has no context of its own, so Devin's prompts there use
+	// the latest interactive omp context. Headless contexts are skipped: the host
+	// keeps one global stream function per api, so a task subagent's binding
+	// (hasUI false) can end up serving the parent's provider turns.
+	const remember = (_event: unknown, ctx: ExtensionContext) => {
+		if (ctx.hasUI) interactiveContext = ctx;
+	};
+	pi.on("session_start", remember);
+	pi.on("agent_start", remember);
 
 	pi.setLabel("Devin (ACP)");
 
@@ -138,8 +182,12 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 			logger,
 			cwd: () => process.cwd(),
 			acquire: (cwd, signal) => registry.acquire(cwd, logger, {}, false, signal),
-			probe: () => DevinAgent.start(process.cwd(), resolveLaunchConfig({}), logger),
+			// Probes only read the catalog; skipping the configured mode saves a
+			// `session/set_mode` per probe inside the host's discovery timeout.
+			probe: () =>
+				DevinAgent.start(process.cwd(), { ...resolveLaunchConfig({}), configuredSessionMode: undefined }, logger),
 			binary: () => resolveLaunchConfig({}).binary,
+			resolvePermission: (request, signal) => resolvePermission(interactiveContext, logger, request, signal),
 		}),
 	);
 	logger.debug("devin-acp: provider registered", { provider: PROVIDER_NAME });
@@ -166,7 +214,7 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 			mode: z
 				.string()
 				.optional()
-				.describe("ACP session mode: accept-edits (default), smart, ask (read-only), or plan"),
+				.describe("ACP session mode: accept-edits, smart, bypass, ask (read-only), or plan; default follows Devin's permission_mode"),
 			model: z.string().optional().describe("Devin model id, e.g. swe-2-high or claude-sonnet-5-5-medium"),
 			effort: z.string().optional().describe("Reasoning effort (Devin `thought_level`), e.g. low, medium, high"),
 		}),
@@ -184,6 +232,7 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 				onActivity: (view, details) => {
 					onUpdate?.({ content: [{ type: "text", text: view }], details });
 				},
+				resolvePermission: (request, permissionSignal) => resolvePermission(ctx, logger, request, permissionSignal),
 			});
 
 			const activity = summarize(result.details);

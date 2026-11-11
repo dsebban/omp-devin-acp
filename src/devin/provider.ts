@@ -17,7 +17,7 @@ import type { ProviderConfig } from "@oh-my-pi/pi-coding-agent";
 // `utils/event-stream.d.ts` under `export *`), so the factory is the only
 // value-exported way to build the stream the host expects.
 import { createAssistantMessageEventStream } from "@oh-my-pi/pi-ai";
-import type { DevinAgent, DevinChunkKind, DevinLogger } from "./agent";
+import type { DevinAgent, DevinChunkKind, DevinLogger, DevinPermissionResolver } from "./agent";
 import { fetchDevinCatalog, levelForEffort, resolveWireModel } from "./catalog";
 import { buildTurnInput } from "./history";
 
@@ -36,6 +36,8 @@ export interface DevinProviderHost {
 	binary(): string;
 	logger: DevinLogger;
 	cwd(): string;
+	/** Answers Devin's permission prompts during a provider turn. */
+	resolvePermission: DevinPermissionResolver;
 }
 
 /**
@@ -191,7 +193,12 @@ async function run(
 	};
 
 	const startedAt = Date.now();
-	const result = await agent.prompt({ prompt: input.prompt, signal: options?.signal, onChunk });
+	const result = await agent.prompt({
+		prompt: input.prompt,
+		signal: options?.signal,
+		onChunk,
+		resolvePermission: host.resolvePermission,
+	});
 	// The session has now seen this request, whatever the outcome; a retry after
 	// an abort must not replay the history a second time.
 	delivered.set(agent, input.deliveredAt);

@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Auto-approve every Devin `session/request_permission` with `allow_once`, falling back to `allow_always` only when it is the sole allow option. Previously the `/model` provider path answered every request `cancelled`, and the `devin` tool cancelled or rejected whenever omp's dialog was unavailable or dismissed, so Devin silently dropped those tool calls. Requests are still answered `cancelled` after a turn is cancelled.
+- Follow Devin's own permission configuration. The session starts in the ACP mode matching Devin's `permission_mode` (`DEVIN_PERMISSION_MODE` or `~/.config/devin/config.json`) instead of a forced `--permission-mode auto` and `accept-edits`; `dangerous` maps to `bypass`. Devin's `permissions` rules decide first.
+- Show Devin's own permission choices (once, always for the project, reject) when Devin asks, on both the `devin` tool and the `/model` provider path. Previously the provider path answered every request `cancelled`, so Devin silently dropped those tool calls. A dismissed dialog now selects Devin's reject option; without an interactive UI the request is refused and logged.
+- `OMP_DEVIN_PERMISSION_MODE` and `OMP_DEVIN_SESSION_MODE` no longer have defaults; set them to override Devin's configuration.
 
 ## 0.2.0 - 2026-10-20
 

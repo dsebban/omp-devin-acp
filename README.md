@@ -85,6 +85,7 @@ Run `bun run check` for the TypeScript check. For a real integration check, use 
 | Usage | Complete a provider turn | Saved omp assistant message has token counts and estimated cost; compare with catalog rates, not ACU billing. |
 | Commands and lifecycle | `/devin status`, advertised mode/model/effort pickers, `/devin reset` | Status reflects selections; reset stops the owned session and the next turn creates a new one. |
 | Cancellation | Cancel an active turn | Partial output is retained and the turn ends as `aborted`. |
+| Permissions | Set `permission_mode` and `"permissions": {"ask": ["Exec(rm)"]}` in `~/.config/devin/config.json`, then ask Devin to `rm` a disposable file | `/devin status` shows the mode matching `permission_mode`; omp shows Devin's choices, and "No" leaves the file in place. |
 
 omp logs are under `~/.omp/logs/`; Devin CLI logs are under `~/.local/share/devin/cli/logs/` with the default data directory. Match the active omp pid and its Devin child rather than reading an old probe's log. `devin-acp: initialized` proves the handshake, and `devin-acp: provider turn complete` records model, effort, history replay, tool count, elapsed time, and stop reason. Inspect the saved omp message for token usage and pricing. Do not publish raw logs: they can contain prompts, commands, and private paths.
 
@@ -101,8 +102,8 @@ All settings are environment variables, read when a Devin session starts. Tool p
 | Variable | Default | Meaning |
 |---|---|---|
 | `OMP_DEVIN_BIN` | `devin` from `PATH` | Devin CLI binary. |
-| `OMP_DEVIN_PERMISSION_MODE` | `auto` | CLI permission floor: `auto`, `accept-edits`, `smart`, `dangerous`. Passed before the `acp` subcommand, where Devin requires it. |
-| `OMP_DEVIN_SESSION_MODE` | `accept-edits` | ACP session mode applied after `session/new`: `accept-edits`, `smart`, `ask` (read-only), `plan`. |
+| `OMP_DEVIN_PERMISSION_MODE` | unset | Devin's `--permission-mode` (`auto`, `accept-edits`, `smart`, `dangerous`), passed before the `acp` subcommand only when set. Unset, Devin uses `DEVIN_PERMISSION_MODE`, then `permission_mode` from `~/.config/devin/config.json`. |
+| `OMP_DEVIN_SESSION_MODE` | follows Devin's permission mode | ACP session mode applied after `session/new`: `accept-edits`, `smart`, `bypass`, `ask` (read-only), `plan`. |
 | `OMP_DEVIN_MODEL` | Devin's own default | Value for the `model` session config option (Devin does not implement `session/set_model`). |
 | `OMP_DEVIN_THOUGHT_LEVEL` | Devin's own default | Value for the `thought_level` session config option. |
 | `OMP_DEVIN_ISOLATE_MCP` | `1` | Hide `~/.config/devin/mcp_config.json` from the child so the delegate starts no foreign MCP servers. |
@@ -112,18 +113,17 @@ Concurrent `devin` tool calls in one assistant message queue on the single Devin
 
 ### Permission behavior — read this
 
-Devin's ACP sessions start in `accept-edits`, which auto-approves workspace edits **and** shell commands without sending `session/request_permission`. Measured: file writes, `rm` inside the workspace, and `curl` all ran unprompted; only an out-of-workspace `rm -rf` was refused by Devin itself.
+The extension follows Devin's own permission configuration instead of overriding it:
 
-The CLI permission floor does not change that. Driving `rm -f <file>` through a fresh session at each floor (devin 3000.11.92):
+- **Rules.** Devin applies the `permissions` `deny`, `ask`, and `allow` rules from its user, project (`.devin/config.json`), and local configs before asking anything. A denied call never reaches omp; an allowed one runs without a prompt.
+- **Mode.** Devin's ACP server starts every session in `accept-edits`, ignoring `--permission-mode`, `DEVIN_PERMISSION_MODE`, and `permission_mode` (measured with devin 3000.12.43). The extension therefore reads Devin's permission mode with Devin's own precedence (`OMP_DEVIN_PERMISSION_MODE`, then `DEVIN_PERMISSION_MODE`, then `permission_mode` in `~/.config/devin/config.json`) and applies the matching ACP mode: `accept-edits` → `accept-edits`, `smart` → `smart`, `dangerous` → `bypass`. `normal`/`auto` keep `accept-edits`, because ACP has no mode that prompts for workspace edits. A mode this Devin build does not advertise is logged at `warn` and Devin's default is kept. `OMP_DEVIN_SESSION_MODE` or the tool's `mode` parameter overrides all of this.
+- **Prompts.** When Devin's rules and mode leave a call to a prompt, it sends `session/request_permission`, and omp shows Devin's own choices (for example "Yes", "Yes, always allow `rm` commands in `<project>`", "No"). Picking an "always" choice persists the grant where Devin's TUI would, with one exception: with `OMP_DEVIN_ISOLATE_MCP=1` (the default) Devin sees a temporary copy of `~/.config/devin`, so an "in all projects" grant may not reach your real user config. Project grants (`.devin/config.json`) are unaffected; add global rules by hand or disable isolation. Dismissing the dialog answers Devin's reject option, and Devin reports the call as refused. Both the `devin` tool and the `/model` provider path prompt; the provider path uses the UI of the omp turn that started it.
+- **No UI.** In print or RPC mode without a UI, omp cannot ask, so the request is refused and logged at `warn`, matching how omp handles its own approvals. Allow the command in Devin's `permissions` or choose a more permissive mode for unattended runs.
+- **Cancel.** A request pending when the turn is cancelled is answered `cancelled`, as ACP requires, and its dialog closes.
 
-| `--permission-mode` | `session/request_permission` sent | File deleted |
-|---|---|---|
-| `auto` | 0 | yes |
-| `accept-edits` | 0 | yes |
-| `smart` | 0 | no — Devin refused on its own |
-| `dangerous` | 0 | yes |
+Which calls prompt depends on the Devin build. Devin's docs say `accept-edits` prompts for shell commands, but measured on devin 3000.11.92, `accept-edits` ran `rm` inside the workspace and `curl` with no `session/request_permission` at all (only an out-of-workspace `rm -rf` was refused by Devin itself). To guarantee a prompt for a command, add an `ask` rule, for example `"permissions": {"ask": ["Exec(rm)"]}`.
 
-So omp's approval prompt is not a gate on Devin's actions. Every tool call Devin makes is still reported in the tool preview and in the result's `details.toolCalls`. `mode: "ask"` is **not** a prompting mode either: measured, Devin refuses the edit and replies with the shell command it would have run, without sending `session/request_permission`. No measured mode produces a permission prompt. When Devin does send `session/request_permission`, the extension approves it without asking, picking `allow_once` and falling back to `allow_always` only when Devin offers nothing else, because Devin can persist "always" grants to the project's `.devin/config.json` or your global Devin config. Nothing in omp gates Devin's individual actions: the `devin` tool's approval covers only the delegation itself, and the `/model` provider path has no approval step at all. A request is answered `cancelled` only after the turn was cancelled, as ACP requires, or when Devin offers no allow option, which is logged at `warn`. Answering `cancelled` otherwise makes Devin drop the tool call and continue as if refused, which is what happened in 0.2.0 on the provider path and whenever omp could not show a dialog.
+omp's approval of the `devin` tool covers the delegation only; Devin's individual actions are gated by Devin's configuration and the prompts above. Every tool call Devin makes is reported in the tool preview and in the result's `details.toolCalls`. `mode: "ask"` is read-only: measured, Devin refuses edits and replies with the command it would have run.
 
 ### MCP isolation
 

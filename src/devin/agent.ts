@@ -7,7 +7,6 @@ import {
 	type InitializeResponse,
 	type NewSessionResponse,
 	type PromptResponse,
-	type PermissionOption,
 	type RequestPermissionRequest,
 	type RequestPermissionResponse,
 	type SessionConfigOption,
@@ -22,6 +21,16 @@ export interface DevinLogger {
 	warn(message: string, data?: Record<string, unknown>): void;
 	error(message: string, data?: Record<string, unknown>): void;
 }
+
+/**
+ * Asks the user about a tool call Devin's own rules left to a prompt. Returns
+ * the chosen `optionId`, or undefined when the user refused or could not be
+ * asked. The signal fires when the turn is cancelled, so a dialog can close.
+ */
+export type DevinPermissionResolver = (
+	request: RequestPermissionRequest,
+	signal: AbortSignal,
+) => Promise<string | undefined>;
 
 /** `tool` chunks are one settled tool call, rendered as `✓ <title>` / `✗ <title>`. */
 export type DevinChunkKind = "text" | "thought" | "tool";
@@ -40,6 +49,7 @@ export interface DevinPromptOptions {
 	 * increments, not a re-rendered view.
 	 */
 	onChunk?: (kind: DevinChunkKind, chunk: string) => void;
+	resolvePermission?: DevinPermissionResolver;
 }
 
 export interface DevinTurnResult {
@@ -95,8 +105,9 @@ export class DevinAgent {
 	#activeTurn: TurnTranscript | undefined;
 	/** Resolves when the in-flight turn settles; used to unwind before killing. */
 	#turnSettled: Promise<void> | undefined;
-	/** Set once `session/cancel` is sent for the in-flight turn. */
-	#turnCancelled = false;
+	#resolvePermission: DevinPermissionResolver | undefined;
+	/** Fires on `session/cancel`; closes host dialogs and answers later requests `cancelled`. */
+	#permissionAborter: AbortController | undefined;
 	#stderrTail: string[] = [];
 	#exitReason: string | undefined;
 	/** Exit code or signal of the child, once it is gone; attached to errors. */
@@ -255,7 +266,20 @@ export class DevinAgent {
 		this.#availableModes = session.modes?.availableModes.map(mode => mode.id) ?? [];
 		this.#configOptions = session.configOptions ?? [];
 
-		if (config.sessionMode && config.sessionMode !== this.#mode) await this.setMode(config.sessionMode);
+		// Devin's ACP server starts every session in `accept-edits` whatever its own
+		// `permission_mode` says (measured, devin 3000.12.43), so apply it here. A
+		// configured mode this build does not advertise (e.g. `smart` before its
+		// rollout) keeps Devin's default instead of failing the launch.
+		const configured = config.configuredSessionMode;
+		const mode =
+			config.sessionMode ?? (configured && this.#availableModes.includes(configured) ? configured : undefined);
+		if (configured && !config.sessionMode && mode !== configured) {
+			this.#logger.warn("devin-acp: configured permission mode not advertised over ACP", {
+				mode: configured,
+				available: this.#availableModes,
+			});
+		}
+		if (mode && mode !== this.#mode) await this.setMode(mode);
 		if (config.model) await this.setConfigOption("model", config.model);
 		if (config.thoughtLevel) await this.setConfigOption("thought_level", config.thoughtLevel);
 	}
@@ -319,7 +343,8 @@ export class DevinAgent {
 		const settled = Promise.withResolvers<void>();
 		this.#activeTurn = transcript;
 		this.#turnSettled = settled.promise;
-		this.#turnCancelled = false;
+		this.#resolvePermission = options.resolvePermission;
+		this.#permissionAborter = new AbortController();
 		this.#chunkListener = options.onChunk;
 		const emit = options.onActivity;
 		let lastView = "";
@@ -361,15 +386,19 @@ export class DevinAgent {
 			unsubscribe();
 			this.#activeTurn = undefined;
 			this.#turnSettled = undefined;
+			this.#resolvePermission = undefined;
+			// Closes a dialog for a request Devin left unanswered when the turn ended.
+			this.#permissionAborter?.abort();
+			this.#permissionAborter = undefined;
 			this.#chunkListener = undefined;
 			settled.resolve();
 		}
 	}
 
-	/** Tell Devin to stop; permission requests arriving after this are cancelled. */
+	/** Tell Devin to stop and release any dialog waiting on the host. */
 	#cancelTurn(): void {
-		this.#turnCancelled = true;
 		this.#peer.notify("session/cancel", { sessionId: this.#sessionId });
+		this.#permissionAborter?.abort();
 	}
 
 	/**
@@ -458,22 +487,28 @@ export class DevinAgent {
 	async #onRequest(method: string, params: unknown): Promise<unknown> {
 		if (method !== "session/request_permission") throw new AcpMethodNotFound(method);
 		const request = params as RequestPermissionRequest;
-		const title = request.toolCall?.title;
-		// Devin is a delegate that runs its own tools, so every request is approved
-		// without asking the host. Answering `cancelled` makes Devin
-		// drop the tool call and carry on as if it had been refused. ACP requires
-		// `cancelled` only once the turn itself has been cancelled.
-		if (this.#turnCancelled) return { outcome: { outcome: "cancelled" } } satisfies RequestPermissionResponse;
-		const option = pickAllowOption(request.options ?? []);
-		if (!option) {
-			this.#logger.warn("devin-acp: permission request offered no allow option", {
-				title,
-				options: (request.options ?? []).map(o => o.kind ?? o.name),
-			});
-			return { outcome: { outcome: "cancelled" } } satisfies RequestPermissionResponse;
-		}
-		this.#logger.debug("devin-acp: auto-approved permission", { title, kind: option.kind });
-		return { outcome: { outcome: "selected", optionId: option.optionId } } satisfies RequestPermissionResponse;
+		const cancelled = { outcome: { outcome: "cancelled" } } satisfies RequestPermissionResponse;
+		// Devin sends this only when its own permission rules and mode leave the call
+		// to a prompt (deny rules block and allow rules approve without asking), so
+		// the user decides, as in Devin's TUI. ACP requires `cancelled` once the turn
+		// is cancelled; a refusal picks Devin's reject option so Devin reports it.
+		const aborter = this.#permissionAborter;
+		if (!aborter || aborter.signal.aborted) return cancelled;
+		// Raced against the cancel: a dialog that ignores its signal must not keep
+		// Devin waiting, or the turn never unwinds and the agent is killed.
+		const aborted = new Promise<undefined>(resolve =>
+			aborter.signal.addEventListener("abort", () => resolve(undefined), { once: true }),
+		);
+		const optionId = this.#resolvePermission
+			? await Promise.race([this.#resolvePermission(request, aborter.signal), aborted])
+			: undefined;
+		if (aborter.signal.aborted) return cancelled;
+		if (optionId) return { outcome: { outcome: "selected", optionId } } satisfies RequestPermissionResponse;
+		const options = request.options ?? [];
+		const reject =
+			options.find(option => option.kind === "reject_once") ?? options.find(option => option.kind?.startsWith("reject"));
+		this.#logger.warn("devin-acp: permission refused", { title: request.toolCall?.title });
+		return reject ? ({ outcome: { outcome: "selected", optionId: reject.optionId } } satisfies RequestPermissionResponse) : cancelled;
 	}
 
 	async #readStderr(): Promise<void> {
@@ -534,17 +569,4 @@ export class DevinAgent {
 		}
 		return this.#withStderr(error);
 	}
-}
-
-/**
- * Prefer `allow_once`: Devin can persist `allow_always` grants to the project's
- * `.devin/config.json` or the user's global config, which outlive this session.
- */
-function pickAllowOption(options: PermissionOption[]): PermissionOption | undefined {
-	const allows = options.filter(option => option.kind?.startsWith("allow"));
-	return (
-		allows.find(option => option.kind === "allow_once") ??
-		allows.find(option => option.kind !== "allow_always") ??
-		allows[0]
-	);
 }
