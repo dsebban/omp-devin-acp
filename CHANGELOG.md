@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Substitute `{{history}}` and `{{request}}` in a single pass when building history-replay prompts, so a literal `{{request}}` inside replayed messages does not capture the user's request and leave the template's placeholder unreplaced.
 - Show Devin's finished tool calls in omp's working message instead of the thinking block. omp's thinking-loop guard counted repeated status lines (`✓ mcp__…: Called history_sql …`, `✓ read: Read file`) as a reasoning loop, aborted the turn, cancelled Devin, and retried; Gemini-class models tripped after a few identical MCP calls, and any model after ten identical lines in a row.
 - Record history delivery when the prompt is sent, so a host retry that starts before a cancelled prompt settles no longer replays the history into the same session. A prompt Devin rejects outright still replays next turn.
 - Tell Devin when the host re-sends a message whose previous attempt was cancelled, so it continues from that attempt's completed edits and commands instead of repeating them.

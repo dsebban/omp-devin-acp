@@ -108,8 +108,7 @@ export function buildTurnInput(context: Context, provider: string, deliveredAt: 
 		history = `[… ${omitted} earlier characters omitted]\n${history.slice(omitted)}`;
 	}
 	const prompt = historyTemplate
-		.replace("{{history}}", () => history)
-		.replace("{{request}}", () => request)
+		.replace(/\{\{(history|request)\}\}/g, (_, key) => (key === "history" ? history : request))
 		.trimEnd();
 	return { prompt, deliveredAt: current.timestamp, replayed: rendered.length };
 }
