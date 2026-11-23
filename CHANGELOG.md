@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-11-23
 
 - Stream Devin's tool calls incrementally on every lifecycle transition (`pending`/`in_progress` → `completed`/`failed`) into omp's working message and an above-editor live widget (`devin-activity`, capped to 8 lines with an earlier-calls summary), clearing both when the turn finishes.
 - Include compact tool targets (relative paths from `locations`/`rawInput`, commands, patterns/queries) in `toolCallLine` when Devin's title is generic (e.g. `▸ read: src/index.ts` instead of `▸ read: Read file`).
