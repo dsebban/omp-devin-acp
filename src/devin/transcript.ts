@@ -176,7 +176,7 @@ export class TurnTranscript {
 	}
 }
 
-/** `✓ exec: Listed ./` — one line per tool call, shared by the live view and the provider stream. */
+/** `✓ exec: Listed ./` — one line per tool call, shared by the tool's live view and the provider's working message. */
 export function toolCallLine(call: TurnToolCall): string {
 	return `${statusMark(call.status)} ${call.tool ?? call.kind}: ${call.title}`;
 }

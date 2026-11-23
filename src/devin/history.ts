@@ -11,6 +11,7 @@
  */
 import type { Context, Message } from "@oh-my-pi/pi-ai";
 import historyTemplate from "./prompts/history.md" with { type: "text" };
+import resumeTemplate from "./prompts/resume.md" with { type: "text" };
 
 /** Tail kept when the missed transcript is long; Devin needs the recent work, not all of it. */
 const MAX_HISTORY_CHARS = 48_000;
@@ -111,4 +112,9 @@ export function buildTurnInput(context: Context, provider: string, deliveredAt: 
 		.replace("{{request}}", () => request)
 		.trimEnd();
 	return { prompt, deliveredAt: current.timestamp, replayed: rendered.length };
+}
+
+/** Prefixes a request whose previous attempt was cancelled mid-turn and is now re-sent to the same session. */
+export function resumePrompt(prompt: string): string {
+	return resumeTemplate.replace("{{request}}", () => prompt).trimEnd();
 }

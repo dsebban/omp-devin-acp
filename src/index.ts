@@ -197,6 +197,7 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 				DevinAgent.start(process.cwd(), { ...resolveLaunchConfig({}), configuredSessionMode: undefined }, logger),
 			binary: () => resolveLaunchConfig({}).binary,
 			resolvePermission: (request, signal) => resolvePermission(interactiveContext, logger, request, signal),
+			showActivity: line => interactiveContext?.ui.setWorkingMessage(line),
 		}),
 	);
 	logger.debug("devin-acp: provider registered", { provider: PROVIDER_NAME });

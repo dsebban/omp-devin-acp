@@ -5,8 +5,9 @@
  * edits, and runs commands with its own tools, and omp receives the streamed
  * answer as a normal assistant message. omp's tool schemas are not forwarded —
  * an ACP agent owns its loop — so a Devin model answers in one assistant turn
- * and never calls an omp tool. Devin's own tool calls stream into the thinking
- * block as one line each, so a long turn shows what it is doing.
+ * and never calls an omp tool. Devin's own tool calls show in omp's working
+ * message as they finish, not in the stream: omp's thinking-loop guard reads
+ * repeated status lines (`✓ read: Read file`) as a reasoning loop and aborts.
  *
  * The catalog (`catalog.ts`) is cached by the host's SQLite model cache, so its
  * short-lived `devin acp` probe sessions and `devin models list` run once per refresh.
@@ -17,9 +18,9 @@ import type { ProviderConfig } from "@oh-my-pi/pi-coding-agent";
 // `utils/event-stream.d.ts` under `export *`), so the factory is the only
 // value-exported way to build the stream the host expects.
 import { createAssistantMessageEventStream } from "@oh-my-pi/pi-ai";
-import type { DevinAgent, DevinChunkKind, DevinLogger, DevinPermissionResolver } from "./agent";
+import type { DevinAgent, DevinChunkKind, DevinLogger, DevinPermissionResolver, DevinTurnResult } from "./agent";
 import { fetchDevinCatalog, levelForEffort, resolveWireModel } from "./catalog";
-import { buildTurnInput } from "./history";
+import { buildTurnInput, resumePrompt } from "./history";
 
 export const PROVIDER_NAME = "devin";
 /** Custom api id; the host requires one to dispatch `streamSimple`. */
@@ -38,6 +39,8 @@ export interface DevinProviderHost {
 	cwd(): string;
 	/** Answers Devin's permission prompts during a provider turn. */
 	resolvePermission: DevinPermissionResolver;
+	/** Shows Devin's latest finished tool call while a turn runs; undefined restores the host default. */
+	showActivity(line: string | undefined): void;
 }
 
 /**
@@ -45,6 +48,14 @@ export interface DevinProviderHost {
  * the agent object, so a new session (reset, crash, reload) starts unseen.
  */
 const delivered = new WeakMap<DevinAgent, number>();
+
+/**
+ * Timestamp of the user message whose latest attempt was sent and has not
+ * finished. The host re-sends the same message after a stream error, possibly
+ * before the cancelled attempt settles; Devin is then told it resumes an
+ * interrupted attempt, so it builds on that attempt's edits instead of redoing them.
+ */
+const unfinished = new WeakMap<DevinAgent, number>();
 
 function emptyMessage(model: Model<Api>): AssistantMessage {
 	return {
@@ -131,6 +142,7 @@ async function run(
 ): Promise<void> {
 	const agent = await host.acquire(host.cwd(), options?.signal);
 	const input = buildTurnInput(context, PROVIDER_NAME, delivered.get(agent));
+	const resumed = unfinished.get(agent) === input.deliveredAt;
 	await applyModel(agent, model, options);
 
 	const message = emptyMessage(model);
@@ -189,19 +201,33 @@ async function run(
 	const onChunk = (kind: DevinChunkKind, chunk: string) => {
 		if (kind === "text") append("text", chunk);
 		else if (kind === "thought") append("thinking", chunk);
-		else append("thinking", `${open?.kind === "thinking" ? "\n" : ""}${chunk}\n`);
+		else host.showActivity(chunk);
 	};
 
 	const startedAt = Date.now();
-	const result = await agent.prompt({
-		prompt: input.prompt,
-		signal: options?.signal,
-		onChunk,
-		resolvePermission: host.resolvePermission,
-	});
-	// The session has now seen this request, whatever the outcome; a retry after
-	// an abort must not replay the history a second time.
+	// Delivery is recorded at send time: a host retry can start before a
+	// cancelled prompt settles, and must not replay the history into a session
+	// that already holds it. A request Devin rejected outright was never seen.
+	const previous = delivered.get(agent);
 	delivered.set(agent, input.deliveredAt);
+	unfinished.set(agent, input.deliveredAt);
+	let result: DevinTurnResult;
+	try {
+		result = await agent.prompt({
+			prompt: resumed ? resumePrompt(input.prompt) : input.prompt,
+			signal: options?.signal,
+			onChunk,
+			resolvePermission: host.resolvePermission,
+		});
+	} catch (error) {
+		if (previous === undefined) delivered.delete(agent);
+		else delivered.set(agent, previous);
+		unfinished.delete(agent);
+		throw error;
+	} finally {
+		host.showActivity(undefined);
+	}
+	if (result.stopReason !== "cancelled") unfinished.delete(agent);
 
 	// Devin reports a final answer even when it streamed nothing (short replies
 	// can arrive only in the `session/prompt` result).
@@ -231,6 +257,7 @@ async function run(
 		thoughtLevel: agent.configValue("thought_level"),
 		stopReason: result.stopReason,
 		replayed: input.replayed,
+		resumed,
 		promptChars: input.prompt.length,
 		chars,
 		toolCalls: result.details.toolCalls.length,
