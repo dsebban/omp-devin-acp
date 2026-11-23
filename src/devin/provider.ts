@@ -5,9 +5,10 @@
  * edits, and runs commands with its own tools, and omp receives the streamed
  * answer as a normal assistant message. omp's tool schemas are not forwarded —
  * an ACP agent owns its loop — so a Devin model answers in one assistant turn
- * and never calls an omp tool. Devin's own tool calls show in omp's working
- * message as they finish, not in the stream: omp's thinking-loop guard reads
- * repeated status lines (`✓ read: Read file`) as a reasoning loop and aborts.
+ * and never calls an omp tool. Devin's own tool calls stream incrementally into
+ * omp's working message and live widget as they start and finish, not into the
+ * assistant stream: omp's thinking-loop guard reads repeated status lines
+ * (`✓ read: Read file`) as a reasoning loop and aborts.
  *
  * The catalog (`catalog.ts`) is cached by the host's SQLite model cache, so its
  * short-lived `devin acp` probe sessions and `devin models list` run once per refresh.
@@ -21,6 +22,7 @@ import { createAssistantMessageEventStream } from "@oh-my-pi/pi-ai";
 import type { DevinAgent, DevinChunkKind, DevinLogger, DevinPermissionResolver, DevinTurnResult } from "./agent";
 import { fetchDevinCatalog, levelForEffort, resolveWireModel } from "./catalog";
 import { buildTurnInput, resumePrompt } from "./history";
+import type { TurnToolActivity } from "./transcript";
 
 export const PROVIDER_NAME = "devin";
 /** Custom api id; the host requires one to dispatch `streamSimple`. */
@@ -39,15 +41,17 @@ export interface DevinProviderHost {
 	cwd(): string;
 	/** Answers Devin's permission prompts during a provider turn. */
 	resolvePermission: DevinPermissionResolver;
-	/** Shows Devin's latest finished tool call while a turn runs; undefined restores the host default. */
-	showActivity(line: string | undefined): void;
+	/** Updates omp's live activity display (working message + tool widget) while a turn runs; undefined clears both. */
+	showActivity(activity: TurnToolActivity | undefined): void;
 }
 
 /**
- * Timestamp of the last omp user message each live session answered. Keyed by
- * the agent object, so a new session (reset, crash, reload) starts unseen.
+ * Timestamps of omp user messages each live session has already seen. Keeping
+ * the set (not only the latest) prevents ephemeral side turns such as
+ * `<composer-prediction>` from clobbering the main conversation watermark.
+ * Keyed by the agent object, so a new session (reset, crash, reload) starts unseen.
  */
-const delivered = new WeakMap<DevinAgent, number>();
+const delivered = new WeakMap<DevinAgent, Set<number>>();
 
 /**
  * Timestamp of the user message whose latest attempt was sent and has not
@@ -199,33 +203,40 @@ async function run(
 	};
 
 	const onChunk = (kind: DevinChunkKind, chunk: string) => {
-		if (kind === "text") append("text", chunk);
-		else if (kind === "thought") append("thinking", chunk);
-		else host.showActivity(chunk);
+		append(kind === "text" ? "text" : "thinking", chunk);
 	};
 
 	const startedAt = Date.now();
 	// Delivery is recorded at send time: a host retry can start before a
 	// cancelled prompt settles, and must not replay the history into a session
 	// that already holds it. A request Devin rejected outright was never seen.
-	const previous = delivered.get(agent);
-	delivered.set(agent, input.deliveredAt);
+	let seen = delivered.get(agent);
+	if (!seen) {
+		seen = new Set<number>();
+		delivered.set(agent, seen);
+	}
+	const alreadyDelivered = seen.has(input.deliveredAt);
+	seen.add(input.deliveredAt);
 	unfinished.set(agent, input.deliveredAt);
+	let showedActivity = false;
 	let result: DevinTurnResult;
 	try {
 		result = await agent.prompt({
 			prompt: resumed ? resumePrompt(input.prompt) : input.prompt,
 			signal: options?.signal,
 			onChunk,
+			onToolActivity: activity => {
+				showedActivity = true;
+				host.showActivity(activity);
+			},
 			resolvePermission: host.resolvePermission,
 		});
 	} catch (error) {
-		if (previous === undefined) delivered.delete(agent);
-		else delivered.set(agent, previous);
+		if (!alreadyDelivered) seen.delete(input.deliveredAt);
 		unfinished.delete(agent);
 		throw error;
 	} finally {
-		host.showActivity(undefined);
+		if (showedActivity) host.showActivity(undefined);
 	}
 	if (result.stopReason !== "cancelled") unfinished.delete(agent);
 

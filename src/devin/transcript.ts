@@ -1,3 +1,5 @@
+import * as os from "node:os";
+import * as path from "node:path";
 import type { ContentBlock, PlanEntry, SessionUpdate, TokenUsage, ToolCallUpdate } from "../acp/types";
 
 export interface TurnToolCall {
@@ -7,6 +9,15 @@ export interface TurnToolCall {
 	status: string;
 	/** Devin's internal tool name (`exec`, `apply_patch`, …) when it reports one. */
 	tool?: string;
+	/** Compact target extracted from `locations` or `rawInput` (relative path, command, query, …). */
+	detail?: string;
+}
+
+export interface TurnToolActivity {
+	/** One-line label for omp's working/spinner row (latest active tool, or latest settled tool). */
+	working: string;
+	/** Ordered tool-call lines for omp's live widget above the editor, bounded to widget height. */
+	lines: string[];
 }
 
 export interface TurnDetails {
@@ -20,12 +31,26 @@ export interface TurnDetails {
 }
 
 const INFERENCE_TOOL_NAME_KEY = "cognition.ai/inferenceToolName";
+const EDITABLE_COMMAND_KEY = "cognition.ai/editableCommand";
 const STATUS_MARK: Record<string, string> = {
 	pending: "·",
 	in_progress: "▸",
 	completed: "✓",
 	failed: "✗",
 };
+const ACTIVE_STATUSES = new Set(["pending", "in_progress"]);
+const GENERIC_TITLES = new Set([
+	"tool call",
+	"read file",
+	"edit file",
+	"write file",
+	"run command",
+	"execute command",
+	"list files",
+	"search files",
+]);
+const DETAIL_MAX_CHARS = 80;
+const WIDGET_MAX_LINES = 8;
 
 /** Glyph for a tool call's ACP status; unknown statuses read as pending. */
 export function statusMark(status: string): string {
@@ -47,6 +72,54 @@ function inferenceToolName(update: ToolCallUpdate): string | undefined {
 	return typeof raw === "string" ? raw : undefined;
 }
 
+function oneLine(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+function clipDetail(text: string): string {
+	const single = oneLine(text);
+	return single.length > DETAIL_MAX_CHARS ? `${single.slice(0, DETAIL_MAX_CHARS - 1)}…` : single;
+}
+
+function formatPath(rawPath: string, cwd: string | undefined): string {
+	if (cwd) {
+		const normalizedCwd = cwd.replace(/^\/private\//, "/");
+		const normalizedPath = rawPath.replace(/^\/private\//, "/");
+		const rel = path.relative(normalizedCwd, normalizedPath);
+		if (rel === "") return ".";
+		if (!rel.startsWith("..") && !path.isAbsolute(rel)) return rel;
+	}
+	const home = os.homedir();
+	if (home && rawPath.startsWith(`${home}/`)) return `~/${rawPath.slice(home.length + 1)}`;
+	return rawPath;
+}
+
+function firstString(record: Record<string, unknown> | undefined, keys: readonly string[]): string | undefined {
+	if (!record) return undefined;
+	for (const key of keys) {
+		const value = record[key];
+		if (typeof value === "string" && value.trim()) return value;
+	}
+	return undefined;
+}
+
+function extractToolDetail(update: ToolCallUpdate, cwd: string | undefined): string | undefined {
+	const location = update.locations?.[0];
+	if (location?.path) {
+		const formatted = formatPath(location.path, cwd);
+		return clipDetail(typeof location.line === "number" && location.line > 0 ? `${formatted}:${location.line}` : formatted);
+	}
+	const rawPath = firstString(update.rawInput, ["file_path", "path", "notebook_path"]);
+	if (rawPath) return clipDetail(formatPath(rawPath, cwd));
+	const command =
+		firstString(update.rawInput, ["command"]) ??
+		(typeof update._meta?.[EDITABLE_COMMAND_KEY] === "string" ? update._meta[EDITABLE_COMMAND_KEY] : undefined);
+	if (command) return clipDetail(command);
+	const query = firstString(update.rawInput, ["pattern", "query", "sql", "url", "project"]);
+	if (query) return clipDetail(query);
+	return undefined;
+}
+
 /**
  * Folds one `session/prompt` turn's `session/update` stream into the final
  * assistant text, a live activity view, and structured details for rendering.
@@ -59,6 +132,7 @@ export class TurnTranscript {
 	#plan: PlanEntry[] = [];
 	#usage: TokenUsage | undefined;
 	#mode: string | undefined;
+	#cwd: string | undefined;
 	/** Bounded mirror of `#text`'s end, so the live view never re-joins the answer. */
 	#tail = "";
 	/** Bounded ring of recent tool-call ids; a long turn emits thousands of updates. */
@@ -66,9 +140,10 @@ export class TurnTranscript {
 	/** A tool call interrupted the answer: separate the next message from it. */
 	#breakBeforeText = false;
 
-	constructor(sessionId: string, mode?: string) {
+	constructor(sessionId: string, mode?: string, cwd?: string) {
 		this.#sessionId = sessionId;
 		this.#mode = mode;
+		this.#cwd = cwd;
 	}
 
 	apply(update: SessionUpdate): void {
@@ -121,6 +196,7 @@ export class TurnTranscript {
 			kind: update.kind ?? existing?.kind ?? "other",
 			status: update.status ?? existing?.status ?? "pending",
 			tool: inferenceToolName(update) ?? existing?.tool,
+			detail: extractToolDetail(update, this.#cwd) ?? existing?.detail,
 		};
 		this.#toolCalls.set(id, entry);
 		// One line per tool call, re-rendered as its status advances: pushing per
@@ -159,6 +235,35 @@ export class TurnTranscript {
 		return this.#toolCalls.get(id);
 	}
 
+	/** Live tool-call snapshot for omp's working message and above-editor widget. */
+	toolActivity(maxLines = WIDGET_MAX_LINES): TurnToolActivity | undefined {
+		const total = this.#toolCalls.size;
+		if (total === 0) return undefined;
+		const limit = Math.max(1, maxLines);
+		const visibleCount = total > limit ? Math.max(1, limit - 1) : total;
+		const visibleCalls: TurnToolCall[] = [];
+		for (const id of this.#recent.slice(-visibleCount)) {
+			const call = this.#toolCalls.get(id);
+			if (call) visibleCalls.push(call);
+		}
+		if (visibleCalls.length === 0) return undefined;
+		const lines = visibleCalls.map(toolCallLine);
+		if (total > limit) {
+			const hidden = total - visibleCalls.length;
+			lines.unshift(`… ${hidden} earlier tool ${hidden === 1 ? "call" : "calls"}`);
+		}
+		let active: TurnToolCall | undefined;
+		for (let i = this.#recent.length - 1; i >= 0; i--) {
+			const call = this.#toolCalls.get(this.#recent[i]!);
+			if (call && ACTIVE_STATUSES.has(call.status)) {
+				active = call;
+				break;
+			}
+		}
+		const working = toolCallLine(active ?? visibleCalls[visibleCalls.length - 1]!);
+		return { working, lines };
+	}
+
 	text(): string {
 		return this.#text.join("");
 	}
@@ -176,7 +281,19 @@ export class TurnTranscript {
 	}
 }
 
-/** `✓ exec: Listed ./` — one line per tool call, shared by the tool's live view and the provider's working message. */
+/** `✓ read: src/index.ts` — one line per tool call, shared by the tool's live view and the provider's live activity widget. */
 export function toolCallLine(call: TurnToolCall): string {
-	return `${statusMark(call.status)} ${call.tool ?? call.kind}: ${call.title}`;
+	const name = call.tool ?? call.kind;
+	const title = oneLine(call.title);
+	const detail = call.detail;
+	let summary = title;
+	if (detail) {
+		const lowerTitle = title.toLowerCase();
+		if (GENERIC_TITLES.has(lowerTitle) || lowerTitle === name.toLowerCase() || lowerTitle === call.kind.toLowerCase()) {
+			summary = detail;
+		} else if (!lowerTitle.includes(detail.toLowerCase())) {
+			summary = `${title} · ${detail}`;
+		}
+	}
+	return `${statusMark(call.status)} ${name}: ${summary}`;
 }

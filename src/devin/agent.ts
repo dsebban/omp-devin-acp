@@ -13,7 +13,7 @@ import {
 	type SessionNotification,
 } from "../acp/types";
 import { type DevinLaunchConfig, prepareLaunch } from "./launch";
-import { blockText, type TurnDetails, TurnTranscript, toolCallLine } from "./transcript";
+import { blockText, type TurnDetails, type TurnToolActivity, TurnTranscript } from "./transcript";
 
 /** Structural subset of `pi.logger` so the driver stays host-independent. */
 export interface DevinLogger {
@@ -32,21 +32,19 @@ export type DevinPermissionResolver = (
 	signal: AbortSignal,
 ) => Promise<string | undefined>;
 
-/** `tool` chunks are one settled tool call, rendered as `✓ <title>` / `✗ <title>`. */
-export type DevinChunkKind = "text" | "thought" | "tool";
-
-const TOOL_DONE = new Set(["completed", "failed"]);
+export type DevinChunkKind = "text" | "thought";
 
 export interface DevinPromptOptions {
 	prompt: string;
 	signal?: AbortSignal;
 	/** Called on every streamed update with a compact live view. */
 	onActivity?: (view: string, details: TurnDetails) => void;
+	/** Called whenever Devin starts, updates, or finishes a tool call during the turn. */
+	onToolActivity?: (activity: TurnToolActivity) => void;
 	/**
-	 * Called with each message or thought chunk as Devin emits it, and once per
-	 * settled tool call. Separate from `onActivity`, which reports a folded
-	 * snapshot: a provider streaming into an omp assistant message needs the raw
-	 * increments, not a re-rendered view.
+	 * Called with each message or thought chunk as Devin emits it. Separate from
+	 * `onActivity`, which reports a folded snapshot: a provider streaming into an
+	 * omp assistant message needs the raw increments, not a re-rendered view.
 	 */
 	onChunk?: (kind: DevinChunkKind, chunk: string) => void;
 	resolvePermission?: DevinPermissionResolver;
@@ -339,13 +337,15 @@ export class DevinAgent {
 	async #runPrompt(options: DevinPromptOptions): Promise<DevinTurnResult> {
 		if (!this.alive) throw new Error(`${this.#agentTitle} exited: ${this.#exitReason ?? "unknown reason"}`);
 
-		const transcript = new TurnTranscript(this.#sessionId, this.#mode);
+		const transcript = new TurnTranscript(this.#sessionId, this.#mode, this.#cwd);
 		const settled = Promise.withResolvers<void>();
 		this.#activeTurn = transcript;
 		this.#turnSettled = settled.promise;
 		this.#resolvePermission = options.resolvePermission;
 		this.#permissionAborter = new AbortController();
 		this.#chunkListener = options.onChunk;
+		this.#toolActivityListener = options.onToolActivity;
+		this.#lastToolActivityKey = "";
 		const emit = options.onActivity;
 		let lastView = "";
 		const onUpdate = () => {
@@ -391,6 +391,8 @@ export class DevinAgent {
 			this.#permissionAborter?.abort();
 			this.#permissionAborter = undefined;
 			this.#chunkListener = undefined;
+			this.#toolActivityListener = undefined;
+			this.#lastToolActivityKey = "";
 			settled.resolve();
 		}
 	}
@@ -435,6 +437,8 @@ export class DevinAgent {
 
 	#turnListeners = new Set<() => void>();
 	#chunkListener: ((kind: DevinChunkKind, chunk: string) => void) | undefined;
+	#toolActivityListener: ((activity: TurnToolActivity) => void) | undefined;
+	#lastToolActivityKey = "";
 
 	#onTurnUpdate(listener: () => void): () => void {
 		this.#turnListeners.add(listener);
@@ -466,19 +470,18 @@ export class DevinAgent {
 			if (chunk) this.#chunkListener(chunkKind, chunk);
 		}
 		const update = notification.update;
-		const rawToolCallId =
-			update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
-				? update.toolCallId
-				: undefined;
-		const toolCallId = typeof rawToolCallId === "string" ? rawToolCallId : undefined;
-		const statusBefore = toolCallId ? this.#activeTurn?.toolCall(toolCallId)?.status : undefined;
 		this.#activeTurn?.apply(update);
-		if (toolCallId && this.#chunkListener) {
-			const call = this.#activeTurn?.toolCall(toolCallId);
-			// One line per call, when it settles: the first update usually carries a
-			// generic title ("exec"), the final one says what happened ("Listed ./").
-			if (call && call.status !== statusBefore && TOOL_DONE.has(call.status)) {
-				this.#chunkListener("tool", toolCallLine(call));
+		if (
+			(update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") &&
+			this.#toolActivityListener
+		) {
+			const activity = this.#activeTurn?.toolActivity();
+			if (activity) {
+				const key = `${activity.working}\n${activity.lines.join("\n")}`;
+				if (key !== this.#lastToolActivityKey) {
+					this.#lastToolActivityKey = key;
+					this.#toolActivityListener(activity);
+				}
 			}
 		}
 		for (const listener of this.#turnListeners) listener();

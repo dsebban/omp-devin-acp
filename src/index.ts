@@ -3,7 +3,9 @@ import type { RequestPermissionRequest } from "./acp/types";
 import { DevinAgent, type DevinLogger } from "./devin/agent";
 import { type DevinLaunchOverrides, resolveLaunchConfig } from "./devin/launch";
 import { devinProviderConfig, PROVIDER_NAME } from "./devin/provider";
-import { statusMark, type TurnDetails } from "./devin/transcript";
+import { type TurnDetails, toolCallLine } from "./devin/transcript";
+
+const ACTIVITY_WIDGET_KEY = "devin-activity";
 
 /** Validated arguments of the `devin` tool; mirrors its parameter schema. */
 interface DevinToolParams {
@@ -84,11 +86,18 @@ async function applyOverrides(agent: DevinAgent, overrides: DevinLaunchOverrides
 }
 
 function summarize(details: TurnDetails): string {
-	const parts: string[] = [];
-	for (const call of details.toolCalls) {
-		parts.push(`${statusMark(call.status)} ${call.tool ?? call.kind}: ${call.title}`);
-	}
-	return parts.join("\n");
+	return details.toolCalls.map(toolCallLine).join("\n");
+}
+
+function styleActivityLines(lines: readonly string[], ctx: ExtensionContext): string[] {
+	const theme = ctx.ui.theme;
+	return lines.map(line => {
+		if (line.startsWith("▸ ")) return theme.fg("accent", line);
+		if (line.startsWith("✗ ")) return theme.fg("error", line);
+		if (line.startsWith("✓ ")) return `${theme.fg("success", "✓")}${theme.fg("muted", line.slice(1))}`;
+		if (line.startsWith("… ")) return theme.fg("dim", line);
+		return theme.fg("muted", line);
+	});
 }
 
 /** Latest omp context with a UI, shared by every binding of this module (see `remember`). */
@@ -197,12 +206,21 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 				DevinAgent.start(process.cwd(), { ...resolveLaunchConfig({}), configuredSessionMode: undefined }, logger),
 			binary: () => resolveLaunchConfig({}).binary,
 			resolvePermission: (request, signal) => resolvePermission(interactiveContext, logger, request, signal),
-			showActivity: line => interactiveContext?.ui.setWorkingMessage(line),
+			showActivity: activity => {
+				if (!interactiveContext) return;
+				interactiveContext.ui.setWorkingMessage(activity?.working);
+				interactiveContext.ui.setWidget(
+					ACTIVITY_WIDGET_KEY,
+					activity ? styleActivityLines(activity.lines, interactiveContext) : undefined,
+					{ placement: "aboveEditor" },
+				);
+			},
 		}),
 	);
 	logger.debug("devin-acp: provider registered", { provider: PROVIDER_NAME });
 
 	pi.on("session_shutdown", async () => {
+		interactiveContext?.ui.setWidget(ACTIVITY_WIDGET_KEY, undefined);
 		pi.unregisterProvider(PROVIDER_NAME);
 		await registry.disposeAll();
 	});

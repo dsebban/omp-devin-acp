@@ -67,11 +67,18 @@ function renderMessage(message: Message): string | undefined {
 }
 
 /**
- * Builds the prompt for one Devin turn. `deliveredAt` is the timestamp of the
- * last user message this Devin session answered, undefined for a new session.
- * Devin's own answers after it are skipped: the session already holds them.
+ * Builds the prompt for one Devin turn. `delivered` holds timestamps of user
+ * messages this Devin session has already seen, undefined for a new session.
+ * Scanning backwards finds the latest seen message still present in `context`
+ * so ephemeral side turns (e.g. `<composer-prediction>`) cannot invalidate
+ * tracking and trigger a full transcript replay. Devin's own answers after it
+ * are skipped: the session already holds them.
  */
-export function buildTurnInput(context: Context, provider: string, deliveredAt: number | undefined): DevinTurnInput {
+export function buildTurnInput(
+	context: Context,
+	provider: string,
+	delivered: ReadonlySet<number> | undefined,
+): DevinTurnInput {
 	const messages = context.messages;
 	let latest = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -85,12 +92,17 @@ export function buildTurnInput(context: Context, provider: string, deliveredAt: 
 	if (!current || current.role !== "user") throw new Error("No user message to forward to Devin.");
 	const request = contentText(current.content);
 
-	// Start after the last message this session answered; when it is gone (new
-	// session, or omp compacted it away) the session has seen nothing here.
+	// Start after the latest user message this session already saw; when none
+	// remain (new session, or omp compacted them away) replay from the start.
 	let start = 0;
-	if (deliveredAt !== undefined) {
-		const delivered = messages.findIndex(m => m.role === "user" && m.timestamp === deliveredAt);
-		if (delivered >= 0) start = delivered + 1;
+	if (delivered && delivered.size > 0) {
+		for (let i = latest; i >= 0; i--) {
+			const message = messages[i];
+			if (message?.role === "user" && delivered.has(message.timestamp)) {
+				start = i + 1;
+				break;
+			}
+		}
 	}
 	const rendered: string[] = [];
 	for (let i = start; i < latest; i++) {
