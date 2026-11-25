@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 - 2026-11-25
 
 - Set `usage.contextTokens` from omp's own request context rather than letting omp derive context occupancy from Devin's stateful ACP session `totalTokens`/`cacheRead`. Previously, a long-lived Devin session (>omp's compaction threshold, e.g. 462K tokens inside Devin vs 22K in omp) tripped omp auto-compaction on every turn and scaled `keepRecentTokens` down by ~300x, visibly truncating the thread to the latest assistant message after every reply.
 - Release the live Devin ACP session on `session_compact` so genuine omp compactions (such as `/compact`) start the next Devin turn cleanly from the compacted summary instead of replaying it onto pre-compaction state.

@@ -4,7 +4,7 @@ Delegate coding tasks from [omp](https://github.com/can1357/oh-my-pi) to the **D
 
 This is an out-of-tree omp extension: it installs no patches into oh-my-pi and ships its own ACP client, because out-of-tree extensions cannot resolve host subpath packages such as `@oh-my-pi/pi-utils/acp` from a compiled omp binary.
 
-Current release: **v0.3.0**. See [CHANGELOG.md](CHANGELOG.md) for release notes and [AGENTS.md](AGENTS.md) for coding-agent guidance.
+Current release: **v0.3.1**. See [CHANGELOG.md](CHANGELOG.md) for release notes and [AGENTS.md](AGENTS.md) for coding-agent guidance.
 
 ## What it adds
 
