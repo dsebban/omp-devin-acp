@@ -200,6 +200,15 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 			logger,
 			cwd: () => process.cwd(),
 			acquire: (cwd, signal) => registry.acquire(cwd, logger, {}, false, signal),
+			// Side-channel turns (composer predictions, `/btw`, title generation) must
+			// not mutate or queue behind the main Devin session.
+			acquireSide: (cwd, signal) =>
+				DevinAgent.start(
+					cwd,
+					{ ...resolveLaunchConfig({}), sessionMode: undefined, configuredSessionMode: "ask" },
+					logger,
+					signal,
+				),
 			// Probes only read the catalog; skipping the configured mode saves a
 			// `session/set_mode` per probe inside the host's discovery timeout.
 			probe: () =>
@@ -218,6 +227,10 @@ export default function devinAcpExtension(pi: ExtensionAPI): void {
 		}),
 	);
 	logger.debug("devin-acp: provider registered", { provider: PROVIDER_NAME });
+
+	pi.on("session_compact", async (_event, ctx) => {
+		await registry.release(ctx.cwd);
+	});
 
 	pi.on("session_shutdown", async () => {
 		interactiveContext?.ui.setWidget(ACTIVITY_WIDGET_KEY, undefined);

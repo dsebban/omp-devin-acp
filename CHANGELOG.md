@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Set `usage.contextTokens` from omp's own request context rather than letting omp derive context occupancy from Devin's stateful ACP session `totalTokens`/`cacheRead`. Previously, a long-lived Devin session (>omp's compaction threshold, e.g. 462K tokens inside Devin vs 22K in omp) tripped omp auto-compaction on every turn and scaled `keepRecentTokens` down by ~300x, visibly truncating the thread to the latest assistant message after every reply.
+- Release the live Devin ACP session on `session_compact` so genuine omp compactions (such as `/compact`) start the next Devin turn cleanly from the compacted summary instead of replaying it onto pre-compaction state.
+- Route omp side-channel turns (`options.parentSessionId`, such as composer predictions, `/btw`, and title generation) through isolated throwaway read-only (`ask`) Devin sessions with activity/permission UI suppressed, so they do not pollute or queue behind the main Devin session.
+- Skip `.omp-owner` when mirroring `XDG_CONFIG_HOME` into an MCP isolation overlay so nested Devin-in-omp launches do not fail with `EEXIST`.
+
 ## 0.3.0 - 2026-11-23
 
 - Stream Devin's tool calls incrementally on every lifecycle transition (`pending`/`in_progress` → `completed`/`failed`) into omp's working message and an above-editor live widget (`devin-activity`, capped to 8 lines with an earlier-calls summary), clearing both when the turn finishes.

@@ -123,7 +123,7 @@ async function prepareMcpIsolationRoot(): Promise<string> {
 	await fs.mkdir(overlayDevin, { recursive: true });
 
 	for (const entry of await readdirSafe(configRoot)) {
-		if (entry === "devin") continue;
+		if (entry === "devin" || entry === OWNER_FILE) continue;
 		await fs.symlink(path.join(configRoot, entry), path.join(overlayRoot, entry));
 	}
 	for (const entry of await readdirSafe(devinConfig)) {
